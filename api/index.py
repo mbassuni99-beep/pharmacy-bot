@@ -289,8 +289,7 @@ def process_text_input(message):
 # -------------------------------------------------------------
 # Flask Web Routes
 # -------------------------------------------------------------
-@app.route("/", methods=["GET"])
-def home():
+def get_home_html():
     data = load_data()
     t_tot = data.get("target_total", 0)
     t_nw = data.get("target_non_wasfaty", 0)
@@ -325,9 +324,7 @@ def home():
 </body>
 </html>"""
 
-@app.route("/api/webhook", methods=["GET", "POST"])
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
+def handle_webhook_logic():
     if request.method == "POST":
         try:
             json_str = request.get_data().decode("utf-8")
@@ -339,9 +336,7 @@ def webhook():
         return "OK", 200
     return "<h3>Zahrat Alrawda 103 Webhook Endpoint is Active!</h3>", 200
 
-@app.route("/api/reminder", methods=["GET"])
-@app.route("/reminder", methods=["GET"])
-def reminder():
+def handle_reminder_logic():
     data = load_data()
     now = datetime.datetime.now()
     today_day = str(now.day)
@@ -371,3 +366,19 @@ def reminder():
         return jsonify({"status": "sent", "count": sent_count}), 200
 
     return jsonify({"status": "already_submitted"}), 200
+
+@app.route("/", defaults={"path": ""}, methods=["GET", "POST"])
+@app.route("/<path:path>", methods=["GET", "POST"])
+def master_router(path):
+    raw_path = path.strip("/").lower()
+    # Check matched header or url
+    matched = request.headers.get("x-matched-path", "").strip("/").lower()
+    effective = matched or raw_path
+
+    if "webhook" in effective:
+        return handle_webhook_logic()
+    elif "reminder" in effective:
+        return handle_reminder_logic()
+    else:
+        return get_home_html()
+
