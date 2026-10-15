@@ -4,7 +4,12 @@ import calendar
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from db import load_data
+
+# Local import
+try:
+    from db import load_data
+except ImportError:
+    from .db import load_data
 
 def fmt(val):
     return f"{float(val or 0):,.2f}"
@@ -24,7 +29,7 @@ def get_pharmacist_title(user):
         full = f"Dr. {full}"
     return full
 
-def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="Dr. Pharmacist", day_num=None):
+def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="Dr. Pharmacist", day_num=None, expenses=0.0, actual_cash=None):
     data = load_data()
     now = datetime.datetime.now()
     today = now.date()
@@ -65,6 +70,14 @@ def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="D
     emoji_tot = "🟢" if total_ach >= 100 else ("🟡" if total_ach >= 85 else "🔴")
     emoji_nw = "🟢" if nw_ach >= 100 else ("🟡" if nw_ach >= 85 else "🔴")
 
+    # 100% Target Required Daily
+    rem_100_tot = max(0.0, target_total - total_cum)
+    req_100_tot = rem_100_tot / remaining_days
+    if total_cum >= target_total:
+        line_100_tot = "🎯 100% Target: Achieved! 🎉 (100% Complete)"
+    else:
+        line_100_tot = f"🎯 100% Target: {fmt(rem_100_tot)} left ({fmt(req_100_tot)}/day)"
+
     # 85% Incentives
     target_85_nw = target_non_wasfaty * 0.85
     rem_85_nw = max(0.0, target_85_nw - non_wasfaty_cum)
@@ -98,6 +111,34 @@ def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="D
         else:
             growth_line = f"📊 vs Yesterday: {growth_pct:.1f}% 📉 ({fmt(diff)} SAR)"
 
+    # Cash Drawer Audit Calculation
+    drawer_section = []
+    expected_cash = cash_sales - float(expenses or 0.0)
+    drawer_diff = 0.0
+    drawer_status = "مطابق"
+
+    if actual_cash is not None or float(expenses or 0.0) > 0:
+        act = float(actual_cash if actual_cash is not None else expected_cash)
+        drawer_diff = act - expected_cash
+        if abs(drawer_diff) < 0.01:
+            status_line = "✅ مطابق تماماً (عجز: 0.00 SAR)"
+            drawer_status = "مطابق"
+        elif drawer_diff < 0:
+            status_line = f"🔴 عجز في العهدة: {fmt(abs(drawer_diff))} SAR"
+            drawer_status = f"عجز: {fmt(abs(drawer_diff))}"
+        else:
+            status_line = f"🟢 زيادة في العهدة: +{fmt(drawer_diff)} SAR"
+            drawer_status = f"زيادة: +{fmt(drawer_diff)}"
+
+        drawer_section = [
+            "💵 مطابقة عهدة الدرج (Cash Audit):",
+            f"• فواتير/مصاريف الدرج: {fmt(expenses)}",
+            f"• الكاش المفترض توفره: {fmt(expected_cash)}",
+            f"• الكاش الفعلي المسلّم: {fmt(act)}",
+            f"• حالة العهدة: {status_line}",
+            "━━━━━━━━━━━━━"
+        ]
+
     # FEATURE 2: Staff Accountability & Time
     submit_time = now.strftime("%I:%M %p")
     footer_staff = f"👨‍⚕️ Submitted by: {pharmacist_name} ({submit_time})"
@@ -119,17 +160,26 @@ def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="D
     if growth_line:
         msg_lines.append(growth_line)
 
+    msg_lines.append(line_100_tot)
     msg_lines.append(line_85_nw)
     msg_lines.append(line_85_tot)
     msg_lines.append("━━━━━━━━━━━━━")
-    msg_lines.append(footer_staff)
 
+    if drawer_section:
+        msg_lines.extend(drawer_section)
+
+    msg_lines.append(footer_staff)
     whatsapp_msg = "\n".join(msg_lines)
 
     return {
         "daily_sales": daily_sales,
         "cash_sales": cash_sales,
         "wasfaty_today": wasfaty_today,
+        "expenses": float(expenses or 0.0),
+        "actual_cash": float(actual_cash if actual_cash is not None else expected_cash),
+        "expected_cash": expected_cash,
+        "drawer_diff": drawer_diff,
+        "drawer_status": drawer_status,
         "total_cum": total_cum,
         "wasfaty_cum": wasfaty_cum,
         "non_wasfaty_cum": non_wasfaty_cum,
@@ -141,6 +191,8 @@ def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="D
         "emoji_nw": emoji_nw,
         "target_total": target_total,
         "target_non_wasfaty": target_non_wasfaty,
+        "rem_100_tot": rem_100_tot,
+        "req_100_tot": req_100_tot,
         "rem_85_nw": rem_85_nw,
         "req_85_nw": req_85_nw,
         "rem_85_tot": rem_85_tot,
@@ -180,15 +232,18 @@ def generate_excel_report(output_path="/tmp/pharmacy_monthly_report.xlsx"):
         bottom=Side(style='thin', color='D0D7DE')
     )
 
-    ws.merge_cells("A1:G1")
+    ws.merge_cells("A1:J1")
     title_cell = ws["A1"]
-    title_cell.value = f"Zahrat Alrawda 103 - Monthly Sales Report ({now.strftime('%B %Y')})"
+    title_cell.value = f"Zahrat Alrawda 103 - Monthly Sales & Drawer Audit Report ({now.strftime('%B %Y')})"
     title_cell.font = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
     title_cell.fill = navy_fill
     title_cell.alignment = center_align
     ws.row_dimensions[1].height = 32
 
-    headers = ["Day", "Daily Sales", "Cash Sales", "Wasfaty Sales", "Non-Wasfaty Sales", "Cumulative Total", "Status / Notes"]
+    headers = [
+        "Day", "Daily Sales", "Cash Sales", "Wasfaty Sales", "Non-Wasfaty Sales", 
+        "Cumulative Total", "Expenses / فواتير", "Actual Cash / فعلي", "Drawer Status / عهدة", "Pharmacist"
+    ]
     ws.append([])
     ws.append(headers)
     ws.row_dimensions[3].height = 24
@@ -200,7 +255,7 @@ def generate_excel_report(output_path="/tmp/pharmacy_monthly_report.xlsx"):
         c.alignment = center_align
         c.border = thin_border
 
-    cum_total = 0.0
+    cum_total = data.get("base_total_cum", 0.0)
     row_start = 4
     for day in range(1, last_day + 1):
         d_str = str(day)
@@ -209,9 +264,13 @@ def generate_excel_report(output_path="/tmp/pharmacy_monthly_report.xlsx"):
         c_val = h.get("cash", 0.0)
         w_val = h.get("wasfaty", 0.0)
         nw_val = max(0.0, d_val - w_val)
+        exp_val = h.get("expenses", 0.0)
+        act_val = h.get("actual_cash", "")
+        d_status = h.get("drawer_status", "مطابق" if d_val > 0 else "")
+        pharm = h.get("pharmacist", "")
+
         if d_val > 0:
             cum_total += d_val
-        status_note = h.get("notes", "Submitted" if d_val > 0 else "")
 
         row_vals = [
             f"Day {day:02d}",
@@ -220,7 +279,10 @@ def generate_excel_report(output_path="/tmp/pharmacy_monthly_report.xlsx"):
             w_val if w_val > 0 else "",
             nw_val if nw_val > 0 else "",
             cum_total if cum_total > 0 else "",
-            status_note
+            exp_val if exp_val > 0 else "",
+            act_val if act_val != "" else "",
+            d_status,
+            pharm
         ]
         ws.append(row_vals)
         cur_row = row_start + day - 1
@@ -232,7 +294,7 @@ def generate_excel_report(output_path="/tmp/pharmacy_monthly_report.xlsx"):
             cell.border = thin_border
             if col_idx == 1:
                 cell.alignment = center_align
-            elif col_idx in [2, 3, 4, 5, 6]:
+            elif col_idx in [2, 3, 4, 5, 6, 7, 8]:
                 cell.alignment = right_align
                 if isinstance(val, (int, float)):
                     cell.number_format = "#,##0.00"

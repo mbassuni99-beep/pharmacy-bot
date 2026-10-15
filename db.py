@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+import datetime
 
 KV_URL = os.environ.get("KV_REST_API_URL") or os.environ.get("UPSTASH_REDIS_REST_URL")
 KV_TOKEN = os.environ.get("KV_REST_API_TOKEN") or os.environ.get("UPSTASH_REDIS_REST_TOKEN")
@@ -8,11 +9,14 @@ REDIS_URL = os.environ.get("REDIS_URL")
 TEMP_FILE = "/tmp/pharmacy_bot_data.json"
 
 DEFAULT_DATA = {
+    "admin_pin": "1234",
     "target_total": 314803.0,
     "target_non_wasfaty": 276252.0,
     "base_total_cum": 0.0,
     "base_wasfaty_cum": 0.0,
+    "base_days_count": 0,
     "registered_chats": [],
+    "archives": {},
     "history": {
         "6": {
             "daily": 5200.0,
@@ -41,21 +45,31 @@ def load_data():
                 result = res.json().get("result")
                 if result:
                     if isinstance(result, str):
-                        return json.loads(result)
+                        data = json.loads(result)
                     elif isinstance(result, dict):
-                        return result
+                        data = result
+                    else:
+                        data = dict(DEFAULT_DATA)
+                    if "admin_pin" not in data:
+                        data["admin_pin"] = "1234"
+                    if "archives" not in data:
+                        data["archives"] = {}
+                    return data
         except Exception as e:
             print("Error loading from KV:", e)
 
     if REDIS_URL:
         try:
-            import urllib.parse
-            # Quick check if redis-py is available
             import redis
             r = redis.from_url(REDIS_URL)
             val = r.get("pharmacy_data")
             if val:
-                return json.loads(val)
+                data = json.loads(val)
+                if "admin_pin" not in data:
+                    data["admin_pin"] = "1234"
+                if "archives" not in data:
+                    data["archives"] = {}
+                return data
         except Exception as e:
             print("Error loading from REDIS_URL:", e)
 
@@ -63,7 +77,12 @@ def load_data():
     if os.path.exists(TEMP_FILE):
         try:
             with open(TEMP_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if "admin_pin" not in data:
+                    data["admin_pin"] = "1234"
+                if "archives" not in data:
+                    data["archives"] = {}
+                return data
         except Exception:
             pass
 
@@ -105,3 +124,81 @@ def register_chat(chat_id):
     if chat_id not in data["registered_chats"]:
         data["registered_chats"].append(chat_id)
         save_data(data)
+
+def verify_admin_pin(pin):
+    data = load_data()
+    current_pin = str(data.get("admin_pin", "1234")).strip()
+    return str(pin).strip() == current_pin
+
+def set_admin_pin(new_pin):
+    data = load_data()
+    data["admin_pin"] = str(new_pin).strip()
+    save_data(data)
+    return True
+
+def archive_and_reset_month(month_name=None, new_target_tot=None, new_target_nw=None):
+    data = load_data()
+    now = datetime.datetime.now()
+    if not month_name:
+        month_name = now.strftime("%Y_%m")
+
+    if "archives" not in data:
+        data["archives"] = {}
+
+    # Save snapshot of previous month
+    data["archives"][month_name] = {
+        "history": data.get("history", {}),
+        "target_total": data.get("target_total", 0),
+        "target_non_wasfaty": data.get("target_non_wasfaty", 0),
+        "archived_at": now.strftime("%Y-%m-%d %H:%M")
+    }
+
+    # Reset current month
+    data["history"] = {}
+    data["base_total_cum"] = 0.0
+    data["base_wasfaty_cum"] = 0.0
+    data["base_days_count"] = 0
+
+    if new_target_tot is not None and new_target_tot > 0:
+        data["target_total"] = float(new_target_tot)
+    if new_target_nw is not None and new_target_nw > 0:
+        data["target_non_wasfaty"] = float(new_target_nw)
+
+    save_data(data)
+    return True
+
+def set_base_carryover(base_total, base_wasfaty, base_days=0):
+    data = load_data()
+    data["base_total_cum"] = float(base_total)
+    data["base_wasfaty_cum"] = float(base_wasfaty)
+    data["base_days_count"] = int(base_days)
+    save_data(data)
+    return True
+
+def edit_or_delete_day(day_num, new_data=None):
+    data = load_data()
+    d_str = str(int(day_num))
+    if "history" not in data:
+        data["history"] = {}
+
+    if new_data is None:
+        # Delete day
+        if d_str in data["history"]:
+            del data["history"][d_str]
+            save_data(data)
+            return True, "تم مسح بيانات اليوم بنجاح."
+        return False, "اليوم غير موجود في السجل."
+    else:
+        # Update day
+        data["history"][d_str] = new_data
+        save_data(data)
+        return True, "تم تعديل بيانات اليوم بنجاح."
+
+def factory_reset():
+    data = load_data()
+    data["history"] = {}
+    data["base_total_cum"] = 0.0
+    data["base_wasfaty_cum"] = 0.0
+    data["base_days_count"] = 0
+    save_data(data)
+    return True
