@@ -370,15 +370,17 @@ def handle_reminder_logic():
 @app.route("/", defaults={"path": ""}, methods=["GET", "POST"])
 @app.route("/<path:path>", methods=["GET", "POST"])
 def master_router(path):
-    raw_path = path.strip("/").lower()
-    # Check matched header or url
-    matched = request.headers.get("x-matched-path", "").strip("/").lower()
-    effective = matched or raw_path
-
-    if "webhook" in effective:
+    # Any POST request is a Telegram webhook update
+    if request.method == "POST":
         return handle_webhook_logic()
-    elif "reminder" in effective:
+    
+    # Check if this is the cron reminder request
+    req_url = request.url.lower()
+    req_path = path.lower()
+    if "reminder" in req_url or "reminder" in req_path:
         return handle_reminder_logic()
-    else:
-        return get_home_html()
+
+    # Otherwise return the status dashboard page
+    return get_home_html()
+
 
