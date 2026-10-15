@@ -8,13 +8,20 @@ from flask import Flask, request, jsonify
 import telebot
 from telebot import types
 
-# Add parent directory to path so db and logic can be imported
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+# Ensure current directory is in sys.path
+CUR_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(CUR_DIR)
+for p in [CUR_DIR, PARENT_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-from db import load_data, save_data, register_chat
-from logic import calculate_metrics, generate_excel_report, fmt, progress_bar, get_pharmacist_title
+try:
+    from db import load_data, save_data, register_chat
+    from logic import calculate_metrics, generate_excel_report, fmt, progress_bar, get_pharmacist_title
+except ImportError:
+    from .db import load_data, save_data, register_chat
+    from .logic import calculate_metrics, generate_excel_report, fmt, progress_bar, get_pharmacist_title
+
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN") or "8926788986:AAG4ZzgJif82hUl-BZATgV6Sbc9aDbcpO_w"
 bot = telebot.TeleBot(TOKEN, threaded=False)
@@ -319,6 +326,7 @@ def home():
 </html>"""
 
 @app.route("/api/webhook", methods=["GET", "POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "POST":
         try:
@@ -332,6 +340,7 @@ def webhook():
     return "<h3>Zahrat Alrawda 103 Webhook Endpoint is Active!</h3>", 200
 
 @app.route("/api/reminder", methods=["GET"])
+@app.route("/reminder", methods=["GET"])
 def reminder():
     data = load_data()
     now = datetime.datetime.now()
