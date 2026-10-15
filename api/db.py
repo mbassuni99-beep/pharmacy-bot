@@ -15,6 +15,17 @@ DEFAULT_DATA = {
     "base_total_cum": 0.0,
     "base_wasfaty_cum": 0.0,
     "base_days_count": 0,
+    "fixed_custody": 2000.0,
+    "current_custody": {
+        "purchases_invoices": 0.0,
+        "insurance_amounts": 0.0,
+        "actual_cash": 2000.0,
+        "last_audit_date": "",
+        "last_audit_pharmacist": "",
+        "status": "مطابق",
+        "notes": ""
+    },
+    "custody_history": [],
     "registered_chats": [],
     "archives": {},
     "history": {
@@ -35,6 +46,31 @@ DEFAULT_DATA = {
     }
 }
 
+def ensure_defaults(data):
+    if not isinstance(data, dict):
+        data = dict(DEFAULT_DATA)
+    data.setdefault("admin_pin", "1234")
+    data.setdefault("target_total", 314803.0)
+    data.setdefault("target_non_wasfaty", 276252.0)
+    data.setdefault("base_total_cum", 0.0)
+    data.setdefault("base_wasfaty_cum", 0.0)
+    data.setdefault("base_days_count", 0)
+    data.setdefault("fixed_custody", 2000.0)
+    data.setdefault("current_custody", {
+        "purchases_invoices": 0.0,
+        "insurance_amounts": 0.0,
+        "actual_cash": float(data.get("fixed_custody", 2000.0)),
+        "last_audit_date": "",
+        "last_audit_pharmacist": "",
+        "status": "مطابق",
+        "notes": ""
+    })
+    data.setdefault("custody_history", [])
+    data.setdefault("registered_chats", [])
+    data.setdefault("archives", {})
+    data.setdefault("history", {})
+    return data
+
 def load_data():
     if KV_URL and KV_TOKEN:
         try:
@@ -50,11 +86,7 @@ def load_data():
                         data = result
                     else:
                         data = dict(DEFAULT_DATA)
-                    if "admin_pin" not in data:
-                        data["admin_pin"] = "1234"
-                    if "archives" not in data:
-                        data["archives"] = {}
-                    return data
+                    return ensure_defaults(data)
         except Exception as e:
             print("Error loading from KV:", e)
 
@@ -65,11 +97,7 @@ def load_data():
             val = r.get("pharmacy_data")
             if val:
                 data = json.loads(val)
-                if "admin_pin" not in data:
-                    data["admin_pin"] = "1234"
-                if "archives" not in data:
-                    data["archives"] = {}
-                return data
+                return ensure_defaults(data)
         except Exception as e:
             print("Error loading from REDIS_URL:", e)
 
@@ -78,17 +106,14 @@ def load_data():
         try:
             with open(TEMP_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if "admin_pin" not in data:
-                    data["admin_pin"] = "1234"
-                if "archives" not in data:
-                    data["archives"] = {}
-                return data
+                return ensure_defaults(data)
         except Exception:
             pass
 
-    return dict(DEFAULT_DATA)
+    return ensure_defaults(dict(DEFAULT_DATA))
 
 def save_data(data):
+    data = ensure_defaults(data)
     if KV_URL and KV_TOKEN:
         try:
             url = f"{KV_URL.rstrip('/')}/set/pharmacy_data"
@@ -119,8 +144,6 @@ def save_data(data):
 
 def register_chat(chat_id):
     data = load_data()
-    if "registered_chats" not in data:
-        data["registered_chats"] = []
     if chat_id not in data["registered_chats"]:
         data["registered_chats"].append(chat_id)
         save_data(data)
@@ -136,6 +159,148 @@ def set_admin_pin(new_pin):
     save_data(data)
     return True
 
+# -------------------------------------------------------------
+# Custody (Petty Cash Float) Management
+# -------------------------------------------------------------
+def get_custody_info():
+    data = load_data()
+    fixed = float(data.get("fixed_custody", 2000.0))
+    curr = data.get("current_custody", {})
+    invoices = float(curr.get("purchases_invoices", 0.0))
+    insurance = float(curr.get("insurance_amounts", 0.0))
+    actual = float(curr.get("actual_cash", fixed))
+
+    total_docs = invoices + insurance
+    expected = max(0.0, fixed - total_docs)
+    diff = actual - expected
+
+    if abs(diff) < 0.01:
+        status = "مطابق"
+        diff_str = "0.00"
+    elif diff < 0:
+        status = f"عجز: {abs(diff):,.2f} SAR"
+        diff_str = f"-{abs(diff):,.2f}"
+    else:
+        status = f"زيادة: +{diff:,.2f} SAR"
+        diff_str = f"+{diff:,.2f}"
+
+    return {
+        "fixed_custody": fixed,
+        "purchases_invoices": invoices,
+        "insurance_amounts": insurance,
+        "total_documents": total_docs,
+        "expected_cash": expected,
+        "actual_cash": actual,
+        "diff": diff,
+        "diff_str": diff_str,
+        "status": status,
+        "last_audit_date": curr.get("last_audit_date", ""),
+        "last_audit_pharmacist": curr.get("last_audit_pharmacist", ""),
+        "notes": curr.get("notes", "")
+    }
+
+def save_custody_audit(purchases_invoices, insurance_amounts, actual_cash, pharmacist_name, notes=""):
+    data = load_data()
+    fixed = float(data.get("fixed_custody", 2000.0))
+    invoices = float(purchases_invoices or 0.0)
+    insurance = float(insurance_amounts or 0.0)
+    actual = float(actual_cash or 0.0)
+
+    total_docs = invoices + insurance
+    expected = max(0.0, fixed - total_docs)
+    diff = actual - expected
+
+    if abs(diff) < 0.01:
+        status = "مطابق"
+    elif diff < 0:
+        status = f"عجز: {abs(diff):,.2f} SAR"
+    else:
+        status = f"زيادة: +{diff:,.2f} SAR"
+
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
+
+    record = {
+        "date": now_str,
+        "fixed": fixed,
+        "invoices": invoices,
+        "insurance": insurance,
+        "total_docs": total_docs,
+        "expected": expected,
+        "actual": actual,
+        "diff": diff,
+        "status": status,
+        "pharmacist": pharmacist_name,
+        "notes": notes
+    }
+
+    data["current_custody"] = {
+        "purchases_invoices": invoices,
+        "insurance_amounts": insurance,
+        "actual_cash": actual,
+        "last_audit_date": now_str,
+        "last_audit_pharmacist": pharmacist_name,
+        "status": status,
+        "notes": notes
+    }
+
+    if "custody_history" not in data:
+        data["custody_history"] = []
+    data["custody_history"].append(record)
+
+    # Keep last 50 audit entries
+    if len(data["custody_history"]) > 50:
+        data["custody_history"] = data["custody_history"][-50:]
+
+    save_data(data)
+    return record
+
+def set_fixed_custody_amount(new_amount):
+    data = load_data()
+    data["fixed_custody"] = float(new_amount)
+    save_data(data)
+    return True
+
+def replenish_custody(pharmacist_name="Admin"):
+    """
+    تسوية / تعويض العهدة من الإدارة:
+    يتم تصفير فواتير المشتريات ومبالغ التأمين وإعادة الكاش للعهدة الثابتة
+    """
+    data = load_data()
+    fixed = float(data.get("fixed_custody", 2000.0))
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
+
+    rep_record = {
+        "date": now_str,
+        "type": "replenishment",
+        "fixed": fixed,
+        "invoices": 0.0,
+        "insurance": 0.0,
+        "actual": fixed,
+        "diff": 0.0,
+        "status": "تم تعويض العهدة بالكامل ✅",
+        "pharmacist": pharmacist_name,
+        "notes": "استلام كاش التعويض وتصفير الفواتير السابقة"
+    }
+
+    data["current_custody"] = {
+        "purchases_invoices": 0.0,
+        "insurance_amounts": 0.0,
+        "actual_cash": fixed,
+        "last_audit_date": now_str,
+        "last_audit_pharmacist": pharmacist_name,
+        "status": "تم تعويض العهدة - مطابقة ✅",
+        "notes": "تم التعويض"
+    }
+
+    if "custody_history" not in data:
+        data["custody_history"] = []
+    data["custody_history"].append(rep_record)
+    save_data(data)
+    return rep_record
+
+# -------------------------------------------------------------
+# Month & Day Admin Operations
+# -------------------------------------------------------------
 def archive_and_reset_month(month_name=None, new_target_tot=None, new_target_nw=None):
     data = load_data()
     now = datetime.datetime.now()
@@ -145,7 +310,6 @@ def archive_and_reset_month(month_name=None, new_target_tot=None, new_target_nw=
     if "archives" not in data:
         data["archives"] = {}
 
-    # Save snapshot of previous month
     data["archives"][month_name] = {
         "history": data.get("history", {}),
         "target_total": data.get("target_total", 0),
@@ -153,7 +317,6 @@ def archive_and_reset_month(month_name=None, new_target_tot=None, new_target_nw=
         "archived_at": now.strftime("%Y-%m-%d %H:%M")
     }
 
-    # Reset current month
     data["history"] = {}
     data["base_total_cum"] = 0.0
     data["base_wasfaty_cum"] = 0.0
@@ -182,14 +345,12 @@ def edit_or_delete_day(day_num, new_data=None):
         data["history"] = {}
 
     if new_data is None:
-        # Delete day
         if d_str in data["history"]:
             del data["history"][d_str]
             save_data(data)
             return True, "تم مسح بيانات اليوم بنجاح."
         return False, "اليوم غير موجود في السجل."
     else:
-        # Update day
         data["history"][d_str] = new_data
         save_data(data)
         return True, "تم تعديل بيانات اليوم بنجاح."

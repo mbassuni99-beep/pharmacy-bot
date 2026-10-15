@@ -7,9 +7,9 @@ from openpyxl.utils import get_column_letter
 
 # Local import
 try:
-    from db import load_data
+    from db import load_data, get_custody_info
 except ImportError:
-    from .db import load_data
+    from .db import load_data, get_custody_info
 
 def fmt(val):
     return f"{float(val or 0):,.2f}"
@@ -29,7 +29,10 @@ def get_pharmacist_title(user):
         full = f"Dr. {full}"
     return full
 
-def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="Dr. Pharmacist", day_num=None, expenses=0.0, actual_cash=None):
+# -------------------------------------------------------------
+# 1. Daily Sales Calculation
+# -------------------------------------------------------------
+def calculate_sales_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="Dr. Pharmacist", day_num=None):
     data = load_data()
     now = datetime.datetime.now()
     today = now.date()
@@ -70,7 +73,7 @@ def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="D
     emoji_tot = "🟢" if total_ach >= 100 else ("🟡" if total_ach >= 85 else "🔴")
     emoji_nw = "🟢" if nw_ach >= 100 else ("🟡" if nw_ach >= 85 else "🔴")
 
-    # 100% Target Required Daily
+    # 100% Target Run-rate
     rem_100_tot = max(0.0, target_total - total_cum)
     req_100_tot = rem_100_tot / remaining_days
     if total_cum >= target_total:
@@ -111,34 +114,6 @@ def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="D
         else:
             growth_line = f"📊 vs Yesterday: {growth_pct:.1f}% 📉 ({fmt(diff)} SAR)"
 
-    # Cash Drawer Audit Calculation
-    drawer_section = []
-    expected_cash = cash_sales - float(expenses or 0.0)
-    drawer_diff = 0.0
-    drawer_status = "مطابق"
-
-    if actual_cash is not None or float(expenses or 0.0) > 0:
-        act = float(actual_cash if actual_cash is not None else expected_cash)
-        drawer_diff = act - expected_cash
-        if abs(drawer_diff) < 0.01:
-            status_line = "✅ مطابق تماماً (عجز: 0.00 SAR)"
-            drawer_status = "مطابق"
-        elif drawer_diff < 0:
-            status_line = f"🔴 عجز في العهدة: {fmt(abs(drawer_diff))} SAR"
-            drawer_status = f"عجز: {fmt(abs(drawer_diff))}"
-        else:
-            status_line = f"🟢 زيادة في العهدة: +{fmt(drawer_diff)} SAR"
-            drawer_status = f"زيادة: +{fmt(drawer_diff)}"
-
-        drawer_section = [
-            "💵 مطابقة عهدة الدرج (Cash Audit):",
-            f"• فواتير/مصاريف الدرج: {fmt(expenses)}",
-            f"• الكاش المفترض توفره: {fmt(expected_cash)}",
-            f"• الكاش الفعلي المسلّم: {fmt(act)}",
-            f"• حالة العهدة: {status_line}",
-            "━━━━━━━━━━━━━"
-        ]
-
     # FEATURE 2: Staff Accountability & Time
     submit_time = now.strftime("%I:%M %p")
     footer_staff = f"👨‍⚕️ Submitted by: {pharmacist_name} ({submit_time})"
@@ -164,22 +139,14 @@ def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="D
     msg_lines.append(line_85_nw)
     msg_lines.append(line_85_tot)
     msg_lines.append("━━━━━━━━━━━━━")
-
-    if drawer_section:
-        msg_lines.extend(drawer_section)
-
     msg_lines.append(footer_staff)
+
     whatsapp_msg = "\n".join(msg_lines)
 
     return {
         "daily_sales": daily_sales,
         "cash_sales": cash_sales,
         "wasfaty_today": wasfaty_today,
-        "expenses": float(expenses or 0.0),
-        "actual_cash": float(actual_cash if actual_cash is not None else expected_cash),
-        "expected_cash": expected_cash,
-        "drawer_diff": drawer_diff,
-        "drawer_status": drawer_status,
         "total_cum": total_cum,
         "wasfaty_cum": wasfaty_cum,
         "non_wasfaty_cum": non_wasfaty_cum,
@@ -206,17 +173,90 @@ def calculate_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_name="D
         "whatsapp_msg": whatsapp_msg
     }
 
+# -------------------------------------------------------------
+# 2. Petty Cash Custody Audit Calculation
+# -------------------------------------------------------------
+def calculate_custody_audit(purchases_invoices, insurance_amounts, actual_cash, pharmacist_name="Dr. Pharmacist", notes=""):
+    data = load_data()
+    now = datetime.datetime.now()
+    fixed = float(data.get("fixed_custody", 2000.0))
+    invoices = float(purchases_invoices or 0.0)
+    insurance = float(insurance_amounts or 0.0)
+    actual = float(actual_cash or 0.0)
+
+    total_docs = invoices + insurance
+    expected = max(0.0, fixed - total_docs)
+    diff = actual - expected
+
+    if abs(diff) < 0.01:
+        status_line = "✅ مطابقة تماماً (عجز: 0.00 SAR)"
+        status_short = "مطابق"
+        status_emoji = "🟢"
+    elif diff < 0:
+        status_line = f"🔴 عجز في العهدة: {fmt(abs(diff))} SAR ⚠️"
+        status_short = f"عجز: {fmt(abs(diff))}"
+        status_emoji = "🔴"
+    else:
+        status_line = f"🟢 زيادة في العهدة: +{fmt(diff)} SAR"
+        status_short = f"زيادة: +{fmt(diff)}"
+        status_emoji = "🟡"
+
+    audit_time = now.strftime("%I:%M %p")
+    audit_date = now.strftime("%d/%m/%Y")
+
+    wa_lines = [
+        "💼 *تقرير عهدة فرع زهرة الروضة 103* 💊",
+        f"📅 *التاريخ:* {audit_date} ({audit_time})",
+        "━━━━━━━━━━━━━━━━━",
+        f"💵 *العهدة الأساسية للفرع:* {fmt(fixed)} SAR",
+        f"🧾 *فواتير مشتريات ومصروفات:* {fmt(invoices)} SAR",
+        f"📋 *مبالغ التأمين / الاسترداد:* {fmt(insurance)} SAR",
+        f"📊 *إجمالي الفواتير والمستندات:* {fmt(total_docs)} SAR",
+        "━━━━━━━━━━━━━━━━━",
+        f"💰 *الكاش المفترض توفره بالدرج:* {fmt(expected)} SAR",
+        f"💵 *الكاش الفعلي المعدود:* {fmt(actual)} SAR",
+        f"⚖️ *نتيجة الجرد:* {status_line}",
+        "━━━━━━━━━━━━━━━━━",
+        f"👨‍⚕️ *جرد الصيدلي المسؤول:* {pharmacist_name}"
+    ]
+
+    if notes:
+        wa_lines.insert(-1, f"📝 *ملاحظات:* {notes}")
+
+    wa_custody_msg = "\n".join(wa_lines)
+
+    return {
+        "fixed_custody": fixed,
+        "purchases_invoices": invoices,
+        "insurance_amounts": insurance,
+        "total_docs": total_docs,
+        "expected_cash": expected,
+        "actual_cash": actual,
+        "diff": diff,
+        "status_line": status_line,
+        "status_short": status_short,
+        "status_emoji": status_emoji,
+        "pharmacist_name": pharmacist_name,
+        "audit_time": audit_time,
+        "audit_date": audit_date,
+        "whatsapp_msg": wa_custody_msg
+    }
+
+# -------------------------------------------------------------
+# 3. Comprehensive Excel Report Generation
+# -------------------------------------------------------------
 def generate_excel_report(output_path="/tmp/pharmacy_monthly_report.xlsx"):
     data = load_data()
     now = datetime.datetime.now()
     _, last_day = calendar.monthrange(now.year, now.month)
 
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = f"Sales_{now.strftime('%b_%Y')}"
-    ws.views.sheetView[0].showGridLines = True
+    
+    # --- Sheet 1: Daily Sales ---
+    ws_sales = wb.active
+    ws_sales.title = f"Sales_{now.strftime('%b_%Y')}"
+    ws_sales.views.sheetView[0].showGridLines = True
 
-    # Styling
     navy_fill = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")
     header_fill = PatternFill(start_color="2A4D69", end_color="2A4D69", fill_type="solid")
     alt_fill = PatternFill(start_color="F5F7FA", end_color="F5F7FA", fill_type="solid")
@@ -232,24 +272,21 @@ def generate_excel_report(output_path="/tmp/pharmacy_monthly_report.xlsx"):
         bottom=Side(style='thin', color='D0D7DE')
     )
 
-    ws.merge_cells("A1:J1")
-    title_cell = ws["A1"]
-    title_cell.value = f"Zahrat Alrawda 103 - Monthly Sales & Drawer Audit Report ({now.strftime('%B %Y')})"
-    title_cell.font = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
-    title_cell.fill = navy_fill
-    title_cell.alignment = center_align
-    ws.row_dimensions[1].height = 32
+    ws_sales.merge_cells("A1:G1")
+    t1 = ws_sales["A1"]
+    t1.value = f"Zahrat Alrawda 103 - Daily Sales Report ({now.strftime('%B %Y')})"
+    t1.font = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
+    t1.fill = navy_fill
+    t1.alignment = center_align
+    ws_sales.row_dimensions[1].height = 32
 
-    headers = [
-        "Day", "Daily Sales", "Cash Sales", "Wasfaty Sales", "Non-Wasfaty Sales", 
-        "Cumulative Total", "Expenses / فواتير", "Actual Cash / فعلي", "Drawer Status / عهدة", "Pharmacist"
-    ]
-    ws.append([])
-    ws.append(headers)
-    ws.row_dimensions[3].height = 24
+    sales_headers = ["Day", "Daily Sales", "Cash Sales", "Wasfaty Sales", "Non-Wasfaty Sales", "Cumulative Total", "Pharmacist & Notes"]
+    ws_sales.append([])
+    ws_sales.append(sales_headers)
+    ws_sales.row_dimensions[3].height = 24
 
-    for col_idx in range(1, len(headers) + 1):
-        c = ws.cell(row=3, column=col_idx)
+    for col_idx in range(1, len(sales_headers) + 1):
+        c = ws_sales.cell(row=3, column=col_idx)
         c.font = white_font
         c.fill = header_fill
         c.alignment = center_align
@@ -264,10 +301,9 @@ def generate_excel_report(output_path="/tmp/pharmacy_monthly_report.xlsx"):
         c_val = h.get("cash", 0.0)
         w_val = h.get("wasfaty", 0.0)
         nw_val = max(0.0, d_val - w_val)
-        exp_val = h.get("expenses", 0.0)
-        act_val = h.get("actual_cash", "")
-        d_status = h.get("drawer_status", "مطابق" if d_val > 0 else "")
         pharm = h.get("pharmacist", "")
+        time_rec = h.get("time", "")
+        status_note = f"{pharm} ({time_rec})" if d_val > 0 else ""
 
         if d_val > 0:
             cum_total += d_val
@@ -279,22 +315,19 @@ def generate_excel_report(output_path="/tmp/pharmacy_monthly_report.xlsx"):
             w_val if w_val > 0 else "",
             nw_val if nw_val > 0 else "",
             cum_total if cum_total > 0 else "",
-            exp_val if exp_val > 0 else "",
-            act_val if act_val != "" else "",
-            d_status,
-            pharm
+            status_note
         ]
-        ws.append(row_vals)
+        ws_sales.append(row_vals)
         cur_row = row_start + day - 1
-        ws.row_dimensions[cur_row].height = 20
+        ws_sales.row_dimensions[cur_row].height = 20
 
         for col_idx, val in enumerate(row_vals, 1):
-            cell = ws.cell(row=cur_row, column=col_idx)
+            cell = ws_sales.cell(row=cur_row, column=col_idx)
             cell.font = regular_font
             cell.border = thin_border
             if col_idx == 1:
                 cell.alignment = center_align
-            elif col_idx in [2, 3, 4, 5, 6, 7, 8]:
+            elif col_idx in [2, 3, 4, 5, 6]:
                 cell.alignment = right_align
                 if isinstance(val, (int, float)):
                     cell.number_format = "#,##0.00"
@@ -304,10 +337,82 @@ def generate_excel_report(output_path="/tmp/pharmacy_monthly_report.xlsx"):
             if day % 2 == 0 and d_val == 0:
                 cell.fill = alt_fill
 
-    for col in ws.columns:
+    for col in ws_sales.columns:
         col_letter = get_column_letter(col[0].column)
         max_len = max(len(str(cell.value or '')) for cell in col)
-        ws.column_dimensions[col_letter].width = max(max_len + 4, 15)
+        ws_sales.column_dimensions[col_letter].width = max(max_len + 4, 15)
+
+    # --- Sheet 2: Petty Cash Custody Audit History ---
+    ws_cust = wb.create_sheet(title="Petty_Cash_Custody")
+    ws_cust.views.sheetView[0].showGridLines = True
+
+    ws_cust.merge_cells("A1:H1")
+    t2 = ws_cust["A1"]
+    t2.value = f"Zahrat Alrawda 103 - Branch Petty Cash Float & Audit Log (Fixed: {fmt(data.get('fixed_custody', 2000))} SAR)"
+    t2.font = Font(name="Calibri", size=13, bold=True, color="FFFFFF")
+    t2.fill = navy_fill
+    t2.alignment = center_align
+    ws_cust.row_dimensions[1].height = 32
+
+    cust_headers = ["Audit Date & Time", "Fixed Custody", "Purchases / فواتير", "Insurance / تأمين", "Expected Cash", "Actual Cash", "Audit Status", "Pharmacist"]
+    ws_cust.append([])
+    ws_cust.append(cust_headers)
+    ws_cust.row_dimensions[3].height = 24
+
+    for col_idx in range(1, len(cust_headers) + 1):
+        c = ws_cust.cell(row=3, column=col_idx)
+        c.font = white_font
+        c.fill = header_fill
+        c.alignment = center_align
+        c.border = thin_border
+
+    history_records = data.get("custody_history", [])
+    if not history_records:
+        curr = get_custody_info()
+        history_records = [{
+            "date": now.strftime("%Y-%m-%d %I:%M %p"),
+            "fixed": curr["fixed_custody"],
+            "invoices": curr["purchases_invoices"],
+            "insurance": curr["insurance_amounts"],
+            "expected": curr["expected_cash"],
+            "actual": curr["actual_cash"],
+            "status": curr["status"],
+            "pharmacist": curr["last_audit_pharmacist"] or "Current Balance"
+        }]
+
+    r_row = 4
+    for rec in history_records:
+        row_vals = [
+            rec.get("date", ""),
+            rec.get("fixed", 2000.0),
+            rec.get("invoices", 0.0),
+            rec.get("insurance", 0.0),
+            rec.get("expected", 0.0),
+            rec.get("actual", 0.0),
+            rec.get("status", "مطابق"),
+            rec.get("pharmacist", "")
+        ]
+        ws_cust.append(row_vals)
+        ws_cust.row_dimensions[r_row].height = 20
+
+        for col_idx, val in enumerate(row_vals, 1):
+            cell = ws_cust.cell(row=r_row, column=col_idx)
+            cell.font = regular_font
+            cell.border = thin_border
+            if col_idx == 1:
+                cell.alignment = center_align
+            elif col_idx in [2, 3, 4, 5, 6]:
+                cell.alignment = right_align
+                if isinstance(val, (int, float)):
+                    cell.number_format = "#,##0.00"
+            else:
+                cell.alignment = center_align
+        r_row += 1
+
+    for col in ws_cust.columns:
+        col_letter = get_column_letter(col[0].column)
+        max_len = max(len(str(cell.value or '')) for cell in col)
+        ws_cust.column_dimensions[col_letter].width = max(max_len + 4, 15)
 
     wb.save(output_path)
     return output_path

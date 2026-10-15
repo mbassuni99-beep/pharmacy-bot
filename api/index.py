@@ -18,15 +18,23 @@ for p in [CUR_DIR, PARENT_DIR]:
 try:
     from db import (
         load_data, save_data, register_chat, verify_admin_pin, set_admin_pin,
+        get_custody_info, save_custody_audit, set_fixed_custody_amount, replenish_custody,
         archive_and_reset_month, set_base_carryover, edit_or_delete_day, factory_reset
     )
-    from logic import calculate_metrics, generate_excel_report, fmt, progress_bar, get_pharmacist_title
+    from logic import (
+        calculate_sales_metrics, calculate_custody_audit, generate_excel_report,
+        fmt, progress_bar, get_pharmacist_title
+    )
 except ImportError:
     from .db import (
         load_data, save_data, register_chat, verify_admin_pin, set_admin_pin,
+        get_custody_info, save_custody_audit, set_fixed_custody_amount, replenish_custody,
         archive_and_reset_month, set_base_carryover, edit_or_delete_day, factory_reset
     )
-    from .logic import calculate_metrics, generate_excel_report, fmt, progress_bar, get_pharmacist_title
+    from .logic import (
+        calculate_sales_metrics, calculate_custody_audit, generate_excel_report,
+        fmt, progress_bar, get_pharmacist_title
+    )
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN") or "8926788986:AAG4ZzgJif82hUl-BZATgV6Sbc9aDbcpO_w"
 bot = telebot.TeleBot(TOKEN, threaded=False)
@@ -38,37 +46,36 @@ user_states = {}
 def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     btn_record = types.KeyboardButton("📝 تسجيل مبيعات اليوم")
-    btn_drawer = types.KeyboardButton("💵 جرد عهدة الدرج والكاش")
+    btn_custody = types.KeyboardButton("💼 جرد عهدة الصيدلية")
     btn_dash = types.KeyboardButton("📊 لوحة التحكم (Dashboard)")
     btn_target = types.KeyboardButton("🎯 أهداف الشهر والحوافز")
     btn_excel = types.KeyboardButton("📥 تحميل تقرير الإكسل")
     btn_admin = types.KeyboardButton("⚙️ إدارة النظام (Admin)")
-    markup.add(btn_record, btn_drawer)
+    markup.add(btn_record, btn_custody)
     markup.add(btn_dash, btn_target)
     markup.add(btn_excel, btn_admin)
     return markup
 
 # -------------------------------------------------------------
-# Handlers: Start & Menu
+# Handlers: Start & Main Menu
 # -------------------------------------------------------------
 @bot.message_handler(commands=['start', 'menu'])
 def handle_start(message):
     register_chat(message.chat.id)
     user_states.pop(message.chat.id, None)
     welcome_text = (
-        "👋 **مرحباً بك في نظام إدارة ومتابعة مبيعات صيدلية زهرة الروضة 103 💊 (Vercel Serverless 24/7)**\n\n"
-        "✨ **المميزات المتكاملة:**\n"
-        "• 📝 **تسجيل المبيعات السريع:** أرسل 3 أرقام (`مبيعات كاش وصفتي`)\n"
-        "• 💵 **جرد عهدة الدرج:** تتبع فواتير المشتريات، الكاش الفعلي، وحساب العجز أو الزيادة تلقائياً.\n"
-        "• 🎯 **تتبع التارجت وحوافز الـ 85% والـ 100%:** حساب المطلوب يومياً بدقة.\n"
-        "• ⚙️ **لوحة تحكم إدارية برمز سري:** تصفير شهر جديد، إدخال التراكمي السابق، وتعديل أي يوم.\n"
-        "• ⏰ **منبه آلي يومي للشفت** عند الساعة 11:30 PM.\n\n"
+        "👋 **مرحباً بك في نظام إدارة ومتابعة مبيعات وعهدة صيدلية زهرة الروضة 103 💊 (Vercel Serverless 24/7)**\n\n"
+        "✨ **الخدمات الرئيسية المنفصلة:**\n"
+        "• 📝 **تسجيل المبيعات اليومية:** أرسل 3 أرقام (`مبيعات كاش وصفتي`)\n"
+        "• 💼 **جرد عهدة الصيدلية (Petty Cash Float):** متابعة العهدة الثابتة (2,000 ريال)، فواتير المشتريات، التأمين، والكاش الفعلي المتبقي.\n"
+        "• 🎯 **تتبع التارجت وحوافز الـ 85% والـ 100%:** حساب المطلوب يومياً للإغلاق.\n"
+        "• ⚙️ **لوحة تحكم إدارية برمز أمان:** تصفير شهر جديد، إدخال التراكمي السابق، وتعديل أي يوم.\n\n"
         "👇 **اختر الإجراء المطلوب من القائمة أدناه:**"
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
 # -------------------------------------------------------------
-# Dashboard View
+# 1. Dashboard View
 # -------------------------------------------------------------
 @bot.message_handler(func=lambda m: bool(m.text and ("لوحة التحكم" in m.text or "Dashboard" in m.text or "داشبورد" in m.text)))
 def show_dashboard(message):
@@ -121,13 +128,16 @@ def show_dashboard(message):
     rem85_nw = max(0.0, t85_nw - cum_nw)
     req85_nw = rem85_nw / rem_days
 
-    # Last recorded info & drawer
+    # Last recorded sales info
     last_log_str = str(day_num)
     last_info = ""
     if last_log_str in data.get("history", {}):
         h = data["history"][last_log_str]
-        drawer_txt = f" | عهدة: `{h.get('drawer_status', 'مطابق')}`" if h.get("drawer_status") else ""
-        last_info = f"✅ **آخر تسجيل اليوم:** `{fmt(h.get('daily', 0))} SAR` بواسطة {h.get('pharmacist', 'Dr. Staff')} ({h.get('time', '')}){drawer_txt}\n"
+        last_info = f"✅ **آخر مبيعات مسجلة اليوم:** `{fmt(h.get('daily', 0))} SAR` بواسطة {h.get('pharmacist', 'Dr. Staff')} ({h.get('time', '')})\n"
+
+    # Custody quick status
+    c_info = get_custody_info()
+    cust_status_badge = "🟢" if "مطابق" in c_info["status"] else ("🔴" if "عجز" in c_info["status"] else "🟡")
 
     txt = (
         f"📊 **لوحة التحكم المباشرة — صيدلية زهرة الروضة 103 💊**\n"
@@ -154,43 +164,67 @@ def show_dashboard(message):
         f"  👈 المتبقي: `{fmt(rem85_nw)}` (مطلوب: `{fmt(req85_nw)}/يوم`)\n"
         f"• تارجت 85% التوتال: `{fmt(t85_tot)}`\n"
         f"  👈 المتبقي: `{fmt(rem85_tot)}` (مطلوب: `{fmt(req85_tot)}/يوم`)\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💼 **حالة عهدة الفرع الثابتة (Petty Cash):**\n"
+        f"• العهدة الأساسية: `{fmt(c_info['fixed_custody'])} SAR`\n"
+        f"• فواتير + تأمين: `{fmt(c_info['total_documents'])} SAR`\n"
+        f"• كاش فعلي متبقي: `{fmt(c_info['actual_cash'])} SAR`\n"
+        f"• حالة المطابقة: {cust_status_badge} `{c_info['status']}`\n"
     )
 
     markup = types.InlineKeyboardMarkup()
     btn_send = types.InlineKeyboardButton("📝 تسجيل مبيعات اليوم", callback_data="start_record")
-    btn_drawer = types.InlineKeyboardButton("💵 جرد عهدة الدرج", callback_data="start_drawer")
+    btn_cust = types.InlineKeyboardButton("💼 جرد العهدة", callback_data="open_custody_menu")
     btn_ref = types.InlineKeyboardButton("🔄 تحديث البيانات", callback_data="refresh_dash")
-    markup.add(btn_send, btn_drawer)
+    markup.add(btn_send, btn_cust)
     markup.add(btn_ref)
 
     bot.send_message(message.chat.id, txt, reply_markup=markup, parse_mode="Markdown")
 
 # -------------------------------------------------------------
-# Drawer Reconciliation Guide
+# 2. Petty Cash Custody Menu & Actions
 # -------------------------------------------------------------
-@bot.message_handler(func=lambda m: bool(m.text and ("جرد عهدة" in m.text or "الدرج" in m.text)))
-def guide_drawer(message):
+@bot.message_handler(func=lambda m: bool(m.text and ("جرد عهدة" in m.text or "العهدة" in m.text or "عهدة" in m.text)))
+def show_custody_menu(message):
     register_chat(message.chat.id)
+    render_custody_view(message.chat.id)
+
+def render_custody_view(chat_id):
+    c = get_custody_info()
+    status_badge = "🟢" if "مطابق" in c["status"] else ("🔴" if "عجز" in c["status"] else "🟡")
+    
+    last_text = ""
+    if c["last_audit_date"]:
+        last_text = f"🕒 **آخر جرد:** {c['last_audit_date']} بواسطة {c['last_audit_pharmacist']}\n\n"
+
     txt = (
-        "💵 **جرد عهدة الدرج والمبيعات بالتفصيل 📋**\n\n"
-        "يمكنك إرسال 5 أرقام مفصولة بمسافة في رسالة واحدة كالتالي:\n"
-        "`مبيعات_اليوم الكاش وصفتي فواتير_الدرج الكاش_الفعلي`\n\n"
-        "🔹 **مثال توضيحي:**\n"
-        "`5420 2150 1200 150 2000`\n\n"
-        "**تفسير الأرقام في المثال أعلاه:**\n"
-        "• 5420 = إجمالي مبيعات اليوم\n"
-        "• 2150 = مبيعات الكاش\n"
-        "• 1200 = مبيعات وصفتي\n"
-        "• 150 = فواتير مشتريات ومصروفات مدفوعة من الدرج\n"
-        "• 2000 = الكاش الفعلي المعدود في الدرج عند التسليم\n\n"
-        "👈 وسيقوم البوت تلقائياً بحساب:\n"
-        "(الكاش المفترض توفره = 2150 - 150 = 2000)\n"
-        "ومطابقة الكاش الفعلي لإظهار العجز أو الزيادة فوراً في تقرير الواتساب!"
+        f"💼 **إدارة ومطابقة عهدة الفرع المستديمة — صيدلية زهرة الروضة 103** 💊\n\n"
+        f"{last_text}"
+        f"💵 **مبلغ العهدة الأساسي الثابت:** `{fmt(c['fixed_custody'])} SAR`\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"🧾 **فواتير المشتريات والمصروفات:** `{fmt(c['purchases_invoices'])} SAR`\n"
+        f"📋 **مبالغ التأمين / الاسترداد:** `{fmt(c['insurance_amounts'])} SAR`\n"
+        f"📊 **إجمالي المستندات:** `{fmt(c['total_documents'])} SAR`\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"💰 **الكاش المفترض توفره بالدرج:** `{fmt(c['expected_cash'])} SAR`\n"
+        f"💵 **الكاش الفعلي المعدود:** `{fmt(c['actual_cash'])} SAR`\n"
+        f"⚖️ **حالة المطابقة:** {status_badge} **`{c['status']}`**\n\n"
+        "💡 **كيفية تسجيل جرد جديد؟**\n"
+        "اضغط على زر **(📝 تسجيل جرد عهدة جديد)** أو أرسل 3 أرقام مفصولة بمسافة:\n"
+        "`فواتير_المشتريات مبالغ_التأمين الكاش_الفعلي_المتبقي`\n"
+        "🔹 **مثال:** `450 150 1400`"
     )
-    bot.send_message(message.chat.id, txt, parse_mode="Markdown")
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    b_new = types.InlineKeyboardButton("📝 تسجيل جرد عهدة جديد", callback_data="cust_new_audit")
+    b_wa = types.InlineKeyboardButton("📲 إرسال تقرير العهدة للواتساب", callback_data="cust_send_wa")
+    b_rep = types.InlineKeyboardButton("🔄 تسوية وتعويض العهدة (Replenish)", callback_data="cust_replenish")
+    markup.add(b_new, b_wa, b_rep)
+
+    bot.send_message(chat_id, txt, reply_markup=markup, parse_mode="Markdown")
 
 # -------------------------------------------------------------
-# Admin Control Panel (Protected by PIN)
+# 3. Admin Control Panel (Protected by PIN)
 # -------------------------------------------------------------
 @bot.message_handler(func=lambda m: bool(m.text and ("إدارة النظام" in m.text or "Admin" in m.text or "ادارة" in m.text)))
 def prompt_admin(message):
@@ -211,26 +245,29 @@ def render_admin_panel(chat_id):
     t_nw = data.get("target_non_wasfaty", 0)
     base_tot = data.get("base_total_cum", 0)
     base_nw = data.get("base_wasfaty_cum", 0)
+    fixed_cust = data.get("fixed_custody", 2000.0)
 
     txt = (
         "⚙️ **لوحة التحكم الإدارية — صيدلية زهرة الروضة 103** 💊\n\n"
-        f"• عدد الأيام المسجلة بالشهر الحالي: **{days_count} يوم**\n"
-        f"• التراكمي السابق (Base Carryover): `{fmt(base_tot)} SAR` (وصفتي: `{fmt(base_nw)}`)\n"
+        f"• أيام المبيعات المسجلة بالشهر: **{days_count} يوم**\n"
+        f"• التراكمي السابق (Carryover): `{fmt(base_tot)} SAR` (وصفتي: `{fmt(base_nw)}`)\n"
+        f"• مبلغ العهدة الثابتة للفرع: `{fmt(fixed_cust)} SAR`\n"
         f"• تارجت التوتال: `{fmt(t_tot)} SAR` | غير وصفتي: `{fmt(t_nw)} SAR`\n\n"
         "👇 **اختر الإجراء الإداري المطلوب:**"
     )
     markup = types.InlineKeyboardMarkup(row_width=1)
     btn_carry = types.InlineKeyboardButton("📥 إدخال التراكمي السابق (Base Carryover)", callback_data="adm_carryover")
+    btn_set_cust = types.InlineKeyboardButton("💵 تعديل مبلغ العهدة الثابتة للفرع", callback_data="adm_set_fixed_cust")
     btn_edit = types.InlineKeyboardButton("✏️ تعديل أو حذف مبيعات يوم محدد", callback_data="adm_edit_day")
     btn_new_month = types.InlineKeyboardButton("🔄 بداية شهر جديد وأرشفة الشهر المنتهي", callback_data="adm_new_month")
-    btn_clear = types.InlineKeyboardButton("🗑️ مسح وتصفير بيانات الشهر الحالي", callback_data="adm_reset_req")
+    btn_clear = types.InlineKeyboardButton("🗑️ مسح وتصفير مبيعات الشهر الحالي", callback_data="adm_reset_req")
     btn_pin = types.InlineKeyboardButton("🔐 تغيير الرقم السري (PIN)", callback_data="adm_change_pin")
-    markup.add(btn_carry, btn_edit, btn_new_month, btn_clear, btn_pin)
+    markup.add(btn_carry, btn_set_cust, btn_edit, btn_new_month, btn_clear, btn_pin)
 
     bot.send_message(chat_id, txt, reply_markup=markup, parse_mode="Markdown")
 
 # -------------------------------------------------------------
-# Targets & Settings
+# 4. Targets & Settings
 # -------------------------------------------------------------
 @bot.message_handler(func=lambda m: bool(m.text and ("أهداف الشهر" in m.text or "الحوافز" in m.text or "Target" in m.text)))
 def show_targets(message):
@@ -260,7 +297,7 @@ def send_excel(message):
     bot.send_chat_action(message.chat.id, "upload_document")
     path = generate_excel_report()
     now = datetime.datetime.now()
-    caption = f"📊 **تقرير مبيعات وجرد عهدة شهر {now.strftime('%B %Y')} — صيدلية زهرة الروضة 103** 💊"
+    caption = f"📊 **تقرير مبيعات وجرد عهدة شهر {now.strftime('%B %Y')} — صيدلية زهرة الروضة 103** 💊\n*(يحتوي على شيت المبيعات اليومية + شيت جرد العهدة)*"
     with open(path, "rb") as doc:
         bot.send_document(message.chat.id, doc, caption=caption, parse_mode="Markdown")
 
@@ -278,7 +315,7 @@ def guide_record(message):
     bot.send_message(message.chat.id, txt, parse_mode="Markdown")
 
 # -------------------------------------------------------------
-# Inline Callbacks Handler
+# 5. Inline Callbacks Handler
 # -------------------------------------------------------------
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
@@ -291,8 +328,54 @@ def handle_callbacks(call):
     elif call.data == "start_record":
         guide_record(call.message)
         bot.answer_callback_query(call.id)
-    elif call.data == "start_drawer":
-        guide_drawer(call.message)
+    elif call.data == "open_custody_menu":
+        render_custody_view(chat_id)
+        bot.answer_callback_query(call.id)
+    elif call.data == "cust_new_audit":
+        user_states[chat_id] = "awaiting_custody_audit"
+        bot.send_message(
+            chat_id,
+            "💼 **تسجيل جرد عهدة جديد:**\n\n"
+            "أرسل الأرقام الثلاثة التالية مفصولة بمسافة:\n"
+            "`فواتير_المشتريات مبالغ_التأمين الكاش_الفعلي_المتبقي`\n\n"
+            "🔹 **مثال:**\n"
+            "`450 150 1400`\n\n"
+            "*(ملاحظة: إذا لم توجد مبالغ تأمين اكتب 0 مكانها)*",
+            parse_mode="Markdown"
+        )
+        bot.answer_callback_query(call.id)
+    elif call.data == "cust_send_wa":
+        c = get_custody_info()
+        pharm_name = get_pharmacist_title(call.from_user)
+        audit_res = calculate_custody_audit(
+            c["purchases_invoices"], c["insurance_amounts"], c["actual_cash"],
+            pharmacist_name=pharm_name, notes=c.get("notes", "")
+        )
+        wa_enc = urllib.parse.quote(audit_res["whatsapp_msg"])
+        wa_url = f"https://api.whatsapp.com/send?text={wa_enc}"
+
+        markup = types.InlineKeyboardMarkup()
+        btn = types.InlineKeyboardButton("📲 إرسال التقرير لجروب الواتساب الآن", url=wa_url)
+        markup.add(btn)
+
+        msg_preview = (
+            f"📋 **معاينة تقرير عهدة الفرع للواتساب:**\n\n"
+            f"```text\n{audit_res['whatsapp_msg']}\n```"
+        )
+        bot.send_message(chat_id, msg_preview, reply_markup=markup, parse_mode="Markdown")
+        bot.answer_callback_query(call.id)
+    elif call.data == "cust_replenish":
+        pharm_name = get_pharmacist_title(call.from_user)
+        rep = replenish_custody(pharmacist_name=pharm_name)
+        bot.send_message(
+            chat_id,
+            f"🎉 **تمت تسوية وتعويض العهدة بنجاح!**\n\n"
+            f"• تم تصفير الفواتير ومبالغ التأمين السابقة.\n"
+            f"• الكاش الفعلي الآن بالدرج: `{fmt(rep['actual'])} SAR` (مطابق للعهدة الثابتة).\n"
+            f"• المسؤول: {rep['pharmacist']}",
+            parse_mode="Markdown"
+        )
+        render_custody_view(chat_id)
         bot.answer_callback_query(call.id)
     elif call.data == "set_target_total":
         bot.send_message(chat_id, "✏️ أرسل تارجت التوتال الجديد كالتالي:\n`تارجت التوتال 300000`", parse_mode="Markdown")
@@ -312,6 +395,15 @@ def handle_callbacks(call):
             parse_mode="Markdown"
         )
         bot.answer_callback_query(call.id)
+    elif call.data == "adm_set_fixed_cust":
+        user_states[chat_id] = "awaiting_fixed_cust_val"
+        bot.send_message(
+            chat_id,
+            "💵 **تعديل مبلغ العهدة الثابتة للفرع:**\n\n"
+            "أرسل مبلغ العهدة الثابتة الجديد بالريال (مثال: `2500` أو `2000`):",
+            parse_mode="Markdown"
+        )
+        bot.answer_callback_query(call.id)
     elif call.data == "adm_edit_day":
         user_states[chat_id] = "awaiting_edit_day_num"
         bot.send_message(
@@ -322,7 +414,6 @@ def handle_callbacks(call):
         )
         bot.answer_callback_query(call.id)
     elif call.data == "adm_new_month":
-        user_states[chat_id] = "awaiting_new_month_confirm"
         markup = types.InlineKeyboardMarkup()
         b_yes = types.InlineKeyboardButton("✅ نعم، ابدأ شهراً جديداً الآن", callback_data="adm_new_month_yes")
         b_no = types.InlineKeyboardButton("❌ تراجع", callback_data="adm_cancel")
@@ -343,20 +434,20 @@ def handle_callbacks(call):
         bot.answer_callback_query(call.id)
     elif call.data == "adm_reset_req":
         markup = types.InlineKeyboardMarkup()
-        b_yes = types.InlineKeyboardButton("🚨 نعم، امسح كل بيانات الشهر", callback_data="adm_reset_yes")
+        b_yes = types.InlineKeyboardButton("🚨 نعم، امسح مبيعات الشهر", callback_data="adm_reset_yes")
         b_no = types.InlineKeyboardButton("❌ تراجع", callback_data="adm_cancel")
         markup.add(b_yes, b_no)
         bot.send_message(
             chat_id,
             "⚠️ **تحذير أمان عالي:**\n\n"
-            "هل أنت متأكد من مسح جميع بيانات ومبيعات الشهر الحالي وتصفيرها بالكامل؟",
+            "هل أنت متأكد من مسح جميع مبيعات الشهر الحالي وتصفيرها بالكامل؟",
             reply_markup=markup,
             parse_mode="Markdown"
         )
         bot.answer_callback_query(call.id)
     elif call.data == "adm_reset_yes":
         factory_reset()
-        bot.send_message(chat_id, "🗑️ **تم مسح وتصفير جميع بيانات الشهر الحالي بنجاح!**", parse_mode="Markdown")
+        bot.send_message(chat_id, "🗑️ **تم مسح وتصفير جميع مبيعات الشهر الحالي بنجاح!**", parse_mode="Markdown")
         render_admin_panel(chat_id)
         bot.answer_callback_query(call.id)
     elif call.data == "adm_change_pin":
@@ -368,7 +459,7 @@ def handle_callbacks(call):
         bot.answer_callback_query(call.id)
 
 # -------------------------------------------------------------
-# Free Text Processor (PIN, Inputs, Numbers)
+# 6. Free Text Processor (PIN, Inputs, Numbers)
 # -------------------------------------------------------------
 @bot.message_handler(func=lambda m: True)
 def process_text_input(message):
@@ -388,7 +479,54 @@ def process_text_input(message):
             bot.send_message(chat_id, "❌ **رمز الأمان غير صحيح!** حاول مرة أخرى أو اكتب /menu للعودة.")
             return
 
-    # 2. Awaiting Carryover (Base cum)
+    # 2. Awaiting Fixed Custody Amount
+    if state == "awaiting_fixed_cust_val":
+        nums = re.findall(r"[\d\.]+", text.replace(",", ""))
+        if nums:
+            new_val = float(nums[0])
+            set_fixed_custody_amount(new_val)
+            user_states.pop(chat_id, None)
+            bot.send_message(chat_id, f"✅ **تم تحديث مبلغ العهدة الأساسي للفرع إلى:** `{fmt(new_val)} SAR`", parse_mode="Markdown")
+            render_admin_panel(chat_id)
+            return
+        else:
+            bot.send_message(chat_id, "⚠️ يرجى إرسال مبلغ صحيح بالأرقام.")
+            return
+
+    # 3. Awaiting Custody Audit Inputs (invoices insurance actual)
+    if state == "awaiting_custody_audit":
+        nums = re.findall(r"[\d\.]+", text.replace(",", ""))
+        if len(nums) >= 3:
+            invoices = float(nums[0])
+            insurance = float(nums[1])
+            actual = float(nums[2])
+            pharm_name = get_pharmacist_title(message.from_user)
+
+            save_custody_audit(invoices, insurance, actual, pharm_name)
+            audit_res = calculate_custody_audit(invoices, insurance, actual, pharm_name)
+            user_states.pop(chat_id, None)
+
+            wa_enc = urllib.parse.quote(audit_res["whatsapp_msg"])
+            wa_url = f"https://api.whatsapp.com/send?text={wa_enc}"
+
+            markup = types.InlineKeyboardMarkup()
+            btn = types.InlineKeyboardButton("📲 إرسال تقرير العهدة للواتساب الآن", url=wa_url)
+            btn_menu = types.InlineKeyboardButton("💼 فتح قائمة العهدة", callback_data="open_custody_menu")
+            markup.add(btn)
+            markup.add(btn_menu)
+
+            resp = (
+                f"✅ **تم تسجيل وتدقيق عهدة الفرع بنجاح!**\n\n"
+                f"```text\n{audit_res['whatsapp_msg']}\n```\n\n"
+                f"👇 **اضغط أدناه لإرسال تقرير العهدة مباشرة إلى جروب الواتساب:**"
+            )
+            bot.send_message(chat_id, resp, reply_markup=markup, parse_mode="Markdown")
+            return
+        else:
+            bot.send_message(chat_id, "💡 يرجى إرسال 3 أرقام مفصولة بمسافة:\n`فواتير_المشتريات مبالغ_التأمين الكاش_الفعلي_المتبقي`\n🔹 **مثال:** `450 150 1400`")
+            return
+
+    # 4. Awaiting Carryover (Base cum)
     if state == "awaiting_carryover":
         nums = re.findall(r"[\d\.]+", text.replace(",", ""))
         if len(nums) >= 2:
@@ -401,7 +539,7 @@ def process_text_input(message):
                 f"✅ **تم تسجيل التراكمي السابق بنجاح!**\n"
                 f"• إجمالي المبيعات السابقة: `{fmt(base_tot)} SAR`\n"
                 f"• وصفتي السابقة: `{fmt(base_w)} SAR`\n\n"
-                f"سيتم احتساب هذا التراكمي في كل التقارير تلقائياً.",
+                f"سيتم احتساب هذا التراكمي في كل حسابات الشهر تلقائياً.",
                 parse_mode="Markdown"
             )
             render_admin_panel(chat_id)
@@ -410,7 +548,7 @@ def process_text_input(message):
             bot.send_message(chat_id, "💡 يرجى إرسال رقمين مفصولين بمسافة: `تراكمي_المبيعات تراكمي_وصفتي`")
             return
 
-    # 3. Awaiting New PIN
+    # 5. Awaiting New PIN
     if state == "awaiting_new_pin":
         new_pin = text.strip()
         if len(new_pin) >= 4:
@@ -423,7 +561,7 @@ def process_text_input(message):
             bot.send_message(chat_id, "⚠️ يجب أن يتكون الرمز السري من 4 أرقام على الأقل. أرسل رمزاً جديداً:")
             return
 
-    # 4. Awaiting Edit Day Number
+    # 6. Awaiting Edit Day Number
     if state == "awaiting_edit_day_num":
         nums = re.findall(r"\d+", text)
         if nums:
@@ -435,24 +573,24 @@ def process_text_input(message):
             cur_txt = ""
             if existing:
                 cur_txt = f"البيانات الحالية ليوم {target_day}:\nمبيعات: `{fmt(existing.get('daily'))}` | كاش: `{fmt(existing.get('cash'))}` | وصفتي: `{fmt(existing.get('wasfaty'))}`\n\n"
-            
+
             bot.send_message(
                 chat_id,
-                f"📅 **تعديل يوم {target_day}:**\n\n"
+                f"📅 **تعديل مبيعات يوم {target_day}:**\n\n"
                 f"{cur_txt}"
-                f"• لتعديل الأرقام: أرسل الأرقام الجديدة:\n`مبيعات كاش وصفتي` أو `مبيعات كاش وصفتي مصاريف كاش_فعلي`\n"
+                f"• لتعديل الأرقام: أرسل الأرقام الجديدة:\n`مبيعات كاش وصفتي`\n"
                 f"• لحذف يوم {target_day} تماماً: اكتب كلمة `حذف`",
                 parse_mode="Markdown"
             )
             return
 
-    # 5. Handling Day Update or Delete
+    # 7. Handling Day Update or Delete
     if state and state.startswith("editing_day_"):
         target_day = int(state.split("_")[-1])
         if text == "حذف":
             edit_or_delete_day(target_day, None)
             user_states.pop(chat_id, None)
-            bot.send_message(chat_id, f"✅ **تم حذف بيانات يوم {target_day} بالكامل.**", parse_mode="Markdown")
+            bot.send_message(chat_id, f"✅ **تم حذف مبيعات يوم {target_day} بالكامل.**", parse_mode="Markdown")
             render_admin_panel(chat_id)
             return
         else:
@@ -461,19 +599,14 @@ def process_text_input(message):
                 daily = float(nums[0])
                 cash = float(nums[1])
                 wasfaty = float(nums[2])
-                expenses = float(nums[3]) if len(nums) >= 4 else 0.0
-                actual_cash = float(nums[4]) if len(nums) >= 5 else None
 
                 pharmacist_name = get_pharmacist_title(message.from_user)
-                metrics = calculate_metrics(daily, cash, wasfaty, pharmacist_name, day_num=target_day, expenses=expenses, actual_cash=actual_cash)
-                
+                metrics = calculate_sales_metrics(daily, cash, wasfaty, pharmacist_name, day_num=target_day)
+
                 new_rec = {
                     "daily": daily,
                     "cash": cash,
                     "wasfaty": wasfaty,
-                    "expenses": expenses,
-                    "actual_cash": metrics["actual_cash"],
-                    "drawer_status": metrics["drawer_status"],
                     "pharmacist": pharmacist_name,
                     "time": metrics["submit_time"],
                     "date": datetime.date.today().strftime("%Y-%m-%d")
@@ -484,7 +617,7 @@ def process_text_input(message):
                 render_admin_panel(chat_id)
                 return
 
-    # 6. Target updates via text
+    # 8. Target updates via text
     if text.startswith("تارجت التوتال"):
         nums = re.findall(r"[\d\.]+", text)
         if nums:
@@ -505,22 +638,16 @@ def process_text_input(message):
             bot.reply_to(message, f"✅ تم تحديث مستهدف غير وصفتي إلى: `{fmt(val)} SAR`", parse_mode="Markdown")
             return
 
-    # 7. Sales & Cash Drawer Recording (3 or 5 numbers)
+    # 9. Daily Sales Recording (3 numbers)
     raw_numbers = re.findall(r"[\d\.]+", text.replace(",", ""))
     if len(raw_numbers) >= 3:
         try:
             daily = float(raw_numbers[0])
             cash = float(raw_numbers[1])
             wasfaty = float(raw_numbers[2])
-            expenses = float(raw_numbers[3]) if len(raw_numbers) >= 4 else 0.0
-            actual_cash = float(raw_numbers[4]) if len(raw_numbers) >= 5 else None
-
-            # Sanity Warning for extreme outliers
-            if daily > 50000.0 or daily < 50.0:
-                pass  # accepted, but could be flagged if needed
 
             pharmacist_name = get_pharmacist_title(message.from_user)
-            metrics = calculate_metrics(daily, cash, wasfaty, pharmacist_name, expenses=expenses, actual_cash=actual_cash)
+            metrics = calculate_sales_metrics(daily, cash, wasfaty, pharmacist_name)
 
             # Persist to database
             d = load_data()
@@ -531,9 +658,6 @@ def process_text_input(message):
                 "daily": daily,
                 "cash": cash,
                 "wasfaty": wasfaty,
-                "expenses": expenses,
-                "actual_cash": metrics["actual_cash"],
-                "drawer_status": metrics["drawer_status"],
                 "pharmacist": pharmacist_name,
                 "time": metrics["submit_time"],
                 "date": datetime.date.today().strftime("%Y-%m-%d")
@@ -551,7 +675,7 @@ def process_text_input(message):
             markup.add(btn_dash)
 
             resp = (
-                f"✅ **تم تسجيل تقرير اليوم وعُهدة الدرج بنجاح!**\n\n"
+                f"✅ **تم تسجيل تقرير مبيعات اليوم بنجاح وحفظه سحابياً!**\n\n"
                 f"```text\n{metrics['whatsapp_msg']}\n```\n\n"
                 f"👇 **اضغط على الزر أدناه لإرسال التقرير مباشرة إلى جروب الواتساب:**"
             )
@@ -565,20 +689,21 @@ def process_text_input(message):
     bot.reply_to(
         message,
         "💡 استخدم القائمة أدناه أو أرسل:\n"
-        "• للمبيعات السريعة: `مبيعات كاش وصفتي` (مثال: `5200 2000 1200`)\n"
-        "• لجرد الدرج بالتفصيل: `مبيعات كاش وصفتي مصاريف كاش_فعلي` (مثال: `5200 2000 1200 150 1850`)",
+        "• للمبيعات: `مبيعات كاش وصفتي` (مثال: `5200 2000 1200`)\n"
+        "• لجرد العهدة: اضغط على زر **(💼 جرد عهدة الصيدلية)**",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
     )
 
 # -------------------------------------------------------------
-# Flask Web Routes
+# 7. Flask Web Routes (Vercel Serverless)
 # -------------------------------------------------------------
 def get_home_html():
     data = load_data()
     t_tot = data.get("target_total", 0)
     t_nw = data.get("target_non_wasfaty", 0)
     days_recorded = len(data.get("history", {}))
+    c = get_custody_info()
     return f"""<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -591,19 +716,20 @@ def get_home_html():
     .badge {{ display: inline-block; background: #059669; color: white; padding: 6px 14px; border-radius: 20px; font-weight: bold; font-size: 13px; margin: 15px 0; }}
     .stats {{ background: #0f172a; padding: 15px; border-radius: 10px; margin: 20px 0; text-align: right; font-size: 14px; }}
     .stats p {{ margin: 8px 0; }}
-    a.btn {{ display: inline-block; background: #0284c7; color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: bold; }}
+    a.btn {{ display: inline-block; background: #0284c7; color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: bold; margin: 5px; }}
   </style>
 </head>
 <body>
   <div class="card">
     <h1>💊 صيدلية زهرة الروضة 103</h1>
-    <p>نظام تقارير المبيعات وجرد عهدة الدرج السحابي (Vercel Serverless 24/7)</p>
+    <p>نظام تقارير المبيعات وجرد عهدة الفرع السحابي (Vercel Serverless 24/7)</p>
     <div class="badge">🟢 البوت نشط ويعمل 24/7</div>
     <div class="stats">
       <p>🎯 <b>تارجت التوتال:</b> {t_tot:,.2f} SAR</p>
       <p>💊 <b>تارجت غير وصفتي:</b> {t_nw:,.2f} SAR</p>
-      <p>📅 <b>الأيام المسجلة:</b> {days_recorded} يوم</p>
-      <p>🔒 <b>الرقم السري للإدارة:</b> مفعّل</p>
+      <p>📅 <b>أيام المبيعات المسجلة:</b> {days_recorded} يوم</p>
+      <p>💼 <b>العهدة الثابتة للفرع:</b> {c['fixed_custody']:,.2f} SAR ({c['status']})</p>
+      <p>🔒 <b>قفل الإدارة برقم سري:</b> مفعّل</p>
     </div>
     <a class="btn" href="https://t.me/MyPharmaSalesBot" target="_blank">📲 فتح البوت في تليجرام (@MyPharmaSalesBot)</a>
   </div>
@@ -634,13 +760,13 @@ def handle_reminder_logic():
 
         reminder_text = (
             "⏰ **تنبيه إغلاق الشفت اليومي — صيدلية زهرة الروضة 103 💊**\n\n"
-            "دكتور، لم يتم تسجيل مبيعات اليوم وجرد الدرج حتى الآن!\n"
+            "دكتور، لم يتم تسجيل مبيعات اليوم حتى الآن!\n"
             "يرجى فتح البوت وتسجيل الأرقام وإرسال التقرير لجروب الواتساب قبل إغلاق الشفت 📝"
         )
         markup = types.InlineKeyboardMarkup()
         b_rec = types.InlineKeyboardButton("📝 تسجيل مبيعات اليوم", callback_data="start_record")
-        b_drw = types.InlineKeyboardButton("💵 جرد عهدة الدرج", callback_data="start_drawer")
-        markup.add(b_rec, b_drw)
+        b_cst = types.InlineKeyboardButton("💼 جرد عهدة الصيدلية", callback_data="open_custody_menu")
+        markup.add(b_rec, b_cst)
 
         sent_count = 0
         for chat_id in registered:
