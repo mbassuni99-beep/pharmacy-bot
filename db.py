@@ -4,6 +4,7 @@ import requests
 
 KV_URL = os.environ.get("KV_REST_API_URL") or os.environ.get("UPSTASH_REDIS_REST_URL")
 KV_TOKEN = os.environ.get("KV_REST_API_TOKEN") or os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+REDIS_URL = os.environ.get("REDIS_URL")
 TEMP_FILE = "/tmp/pharmacy_bot_data.json"
 
 DEFAULT_DATA = {
@@ -46,6 +47,18 @@ def load_data():
         except Exception as e:
             print("Error loading from KV:", e)
 
+    if REDIS_URL:
+        try:
+            import urllib.parse
+            # Quick check if redis-py is available
+            import redis
+            r = redis.from_url(REDIS_URL)
+            val = r.get("pharmacy_data")
+            if val:
+                return json.loads(val)
+        except Exception as e:
+            print("Error loading from REDIS_URL:", e)
+
     # Local fallback
     if os.path.exists(TEMP_FILE):
         try:
@@ -67,6 +80,15 @@ def save_data(data):
                 return True
         except Exception as e:
             print("Error saving to KV:", e)
+
+    if REDIS_URL:
+        try:
+            import redis
+            r = redis.from_url(REDIS_URL)
+            r.set("pharmacy_data", json.dumps(data))
+            return True
+        except Exception as e:
+            print("Error saving to REDIS_URL:", e)
 
     # Local fallback
     try:
