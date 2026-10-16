@@ -305,14 +305,17 @@ def send_excel(message):
 def guide_record(message):
     register_chat(message.chat.id)
     txt = (
-        "📝 **تسجيل مبيعات اليوم السريع:**\n\n"
+        "📝 **تسجيل مبيعات اليوم:**\n\n"
+        "⚡ **الطريقة السريعة (موصى بها):**\n"
         "أرسل الأرقام الثلاثة في رسالة واحدة مفصولة بمسافة:\n"
         "`مبيعات_اليوم الكاش وصفتي`\n\n"
-        "🔹 **مثال:**\n"
-        "`5420 2150 1200`\n\n"
-        "👈 وسيقوم البوت بحساب التقرير وتجهيز زر الإرسال المباشر للواتساب فوراً!"
+        "🔹 **مثال:** `5420 2150 1200`\n\n"
+        "💬 **أو اضغط على الزر أدناه للتسجيل خطوة بخطوة:**"
     )
-    bot.send_message(message.chat.id, txt, parse_mode="Markdown")
+    markup = types.InlineKeyboardMarkup()
+    btn_wiz = types.InlineKeyboardButton("💬 تسجيل تفاعلي خطوة بخطوة", callback_data="start_sales_wizard")
+    markup.add(btn_wiz)
+    bot.send_message(message.chat.id, txt, reply_markup=markup, parse_mode="Markdown")
 
 # -------------------------------------------------------------
 # 5. Inline Callbacks Handler
@@ -327,6 +330,14 @@ def handle_callbacks(call):
         bot.answer_callback_query(call.id, "تم تحديث البيانات! ✅")
     elif call.data == "start_record":
         guide_record(call.message)
+        bot.answer_callback_query(call.id)
+    elif call.data == "start_sales_wizard":
+        user_states[chat_id] = "sales_wiz_step1"
+        bot.send_message(chat_id, "1️⃣ **الخطوة الأولى:** كم إجمالي مبيعات اليوم بالريال؟ (أرسل الرقم فقط، مثال: `5420`):", parse_mode="Markdown")
+        bot.answer_callback_query(call.id)
+    elif call.data == "cust_wiz":
+        user_states[chat_id] = "cust_wiz_step1"
+        bot.send_message(chat_id, "1️⃣ **الخطوة الأولى:** كم إجمالي فواتير ومصروفات المشتريات من العهدة؟ (أرسل 0 إذا لم يوجد):", parse_mode="Markdown")
         bot.answer_callback_query(call.id)
     elif call.data == "open_custody_menu":
         render_custody_view(chat_id)
@@ -477,6 +488,118 @@ def process_text_input(message):
             return
         else:
             bot.send_message(chat_id, "❌ **رمز الأمان غير صحيح!** حاول مرة أخرى أو اكتب /menu للعودة.")
+            return
+
+    # Interactive Sales Wizard Steps
+    if state == "sales_wiz_step1":
+        nums = re.findall(r"[\d\.]+", text.replace(",", ""))
+        if nums:
+            user_states[chat_id] = f"sales_wiz_step2_{float(nums[0])}"
+            bot.send_message(chat_id, "2️⃣ **الخطوة الثانية:** كم مبيعات الكاش؟ (أرسل الرقم فقط، مثال: `2150`):", parse_mode="Markdown")
+            return
+        else:
+            bot.send_message(chat_id, "⚠️ يرجى إرسال رقم مبيعات صحيح (مثال: `5420`).")
+            return
+
+    if state and state.startswith("sales_wiz_step2_"):
+        wiz_daily = float(state.split("_")[-1])
+        nums = re.findall(r"[\d\.]+", text.replace(",", ""))
+        if nums:
+            wiz_cash = float(nums[0])
+            user_states[chat_id] = f"sales_wiz_step3_{wiz_daily}_{wiz_cash}"
+            bot.send_message(chat_id, "3️⃣ **الخطوة الثالثة:** كم مبيعات وصفتي حتى اليوم؟ (مثال: `1200`):", parse_mode="Markdown")
+            return
+        else:
+            bot.send_message(chat_id, "⚠️ يرجى إرسال رقم كاش صحيح (مثال: `2150`).")
+            return
+
+    if state and state.startswith("sales_wiz_step3_"):
+        parts = state.split("_")
+        wiz_daily = float(parts[3])
+        wiz_cash = float(parts[4])
+        nums = re.findall(r"[\d\.]+", text.replace(",", ""))
+        if nums:
+            wiz_wasfaty = float(nums[0])
+            user_states.pop(chat_id, None)
+            pharm_name = get_pharmacist_title(message.from_user)
+            metrics = calculate_sales_metrics(wiz_daily, wiz_cash, wiz_wasfaty, pharm_name)
+
+            d = load_data()
+            today_day = str(datetime.date.today().day)
+            d["history"][today_day] = {
+                "daily": wiz_daily,
+                "cash": wiz_cash,
+                "wasfaty": wiz_wasfaty,
+                "pharmacist": pharm_name,
+                "time": metrics["submit_time"],
+                "date": datetime.date.today().strftime("%Y-%m-%d")
+            }
+            save_data(d)
+
+            wa_enc = urllib.parse.quote(metrics["whatsapp_msg"])
+            wa_url = f"https://api.whatsapp.com/send?text={wa_enc}"
+            markup = types.InlineKeyboardMarkup()
+            btn_wa = types.InlineKeyboardButton("📲 إرسال التقرير لجروب الواتساب الآن", url=wa_url)
+            btn_dash = types.InlineKeyboardButton("📊 عرض لوحة التحكم", callback_data="refresh_dash")
+            markup.add(btn_wa, btn_dash)
+
+            resp = (
+                f"✅ **تم تسجيل تقرير المبيعات بنجاح عبر المساعد التفاعلي!**\n\n"
+                f"```text\n{metrics['whatsapp_msg']}\n```\n\n"
+                f"👇 **اضغط أدناه لإرسال التقرير مباشرة إلى جروب الواتساب:**"
+            )
+            bot.send_message(chat_id, resp, reply_markup=markup, parse_mode="Markdown")
+            return
+
+    # Interactive Custody Wizard Steps
+    if state == "cust_wiz_step1":
+        nums = re.findall(r"[\d\.]+", text.replace(",", ""))
+        if nums:
+            user_states[chat_id] = f"cust_wiz_step2_{float(nums[0])}"
+            bot.send_message(chat_id, "2️⃣ **الخطوة الثانية:** كم إجمالي مبالغ التأمين / الاسترداد؟ (أرسل 0 إذا لم يوجد):", parse_mode="Markdown")
+            return
+        else:
+            bot.send_message(chat_id, "⚠️ يرجى إرسال رقم صحيح (أو 0).")
+            return
+
+    if state and state.startswith("cust_wiz_step2_"):
+        wiz_inv = float(state.split("_")[-1])
+        nums = re.findall(r"[\d\.]+", text.replace(",", ""))
+        if nums:
+            wiz_ins = float(nums[0])
+            user_states[chat_id] = f"cust_wiz_step3_{wiz_inv}_{wiz_ins}"
+            bot.send_message(chat_id, "3️⃣ **الخطوة الثالثة:** كم الكاش الفعلي المعدود في درج العهدة الآن؟ (مثال: `1400`):", parse_mode="Markdown")
+            return
+        else:
+            bot.send_message(chat_id, "⚠️ يرجى إرسال رقم صحيح.")
+            return
+
+    if state and state.startswith("cust_wiz_step3_"):
+        parts = state.split("_")
+        wiz_inv = float(parts[3])
+        wiz_ins = float(parts[4])
+        nums = re.findall(r"[\d\.]+", text.replace(",", ""))
+        if nums:
+            wiz_act = float(nums[0])
+            user_states.pop(chat_id, None)
+            pharm_name = get_pharmacist_title(message.from_user)
+
+            save_custody_audit(wiz_inv, wiz_ins, wiz_act, pharm_name)
+            audit_res = calculate_custody_audit(wiz_inv, wiz_ins, wiz_act, pharm_name)
+
+            wa_enc = urllib.parse.quote(audit_res["whatsapp_msg"])
+            wa_url = f"https://api.whatsapp.com/send?text={wa_enc}"
+            markup = types.InlineKeyboardMarkup()
+            btn = types.InlineKeyboardButton("📲 إرسال تقرير العهدة للواتساب الآن", url=wa_url)
+            btn_menu = types.InlineKeyboardButton("💼 فتح قائمة العهدة", callback_data="open_custody_menu")
+            markup.add(btn, btn_menu)
+
+            resp = (
+                f"✅ **تم تسجيل وتدقيق عهدة الفرع بنجاح!**\n\n"
+                f"```text\n{audit_res['whatsapp_msg']}\n```\n\n"
+                f"👇 **اضغط أدناه لإرسال تقرير العهدة مباشرة إلى جروب الواتساب:**"
+            )
+            bot.send_message(chat_id, resp, reply_markup=markup, parse_mode="Markdown")
             return
 
     # 2. Awaiting Fixed Custody Amount

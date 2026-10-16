@@ -114,6 +114,12 @@ def calculate_sales_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_n
         else:
             growth_line = f"📊 vs Yesterday: {growth_pct:.1f}% 📉 ({fmt(diff)} SAR)"
 
+    # Card Sales (الشبكة / مدى)
+    card_sales = max(0.0, daily_sales - cash_sales)
+    card_pct = (card_sales / daily_sales * 100) if daily_sales > 0 else 0.0
+    cash_pct = 100.0 - card_pct if daily_sales > 0 else 0.0
+    card_line = f"💳 Card Sales (الشبكة): {fmt(card_sales)} ({card_pct:.1f}%)"
+
     # FEATURE 2: Staff Accountability & Time
     submit_time = now.strftime("%I:%M %p")
     footer_staff = f"👨‍⚕️ Submitted by: {pharmacist_name} ({submit_time})"
@@ -135,6 +141,7 @@ def calculate_sales_metrics(daily_sales, cash_sales, wasfaty_today, pharmacist_n
     if growth_line:
         msg_lines.append(growth_line)
 
+    msg_lines.append(card_line)
     msg_lines.append(line_100_tot)
     msg_lines.append(line_85_nw)
     msg_lines.append(line_85_tot)
